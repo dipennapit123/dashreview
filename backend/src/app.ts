@@ -5,17 +5,33 @@ import { json } from "express";
 import { router } from "./routes";
 import { errorHandler } from "./middlewares/errorHandler";
 
+// Origins allowed for CORS (admin dashboard local + production)
+const ALLOWED_ORIGINS = [
+  "http://localhost:5173",
+  "http://localhost:3000",
+  "http://127.0.0.1:5173",
+  "http://127.0.0.1:3000",
+];
+if (process.env.CORS_ORIGIN) {
+  ALLOWED_ORIGINS.push(...process.env.CORS_ORIGIN.split(",").map((o) => o.trim()));
+}
+
 export const createApp = () => {
   const app = express();
 
-  // Set CORS on every response so browser never blocks (e.g. localhost:5173 → Railway)
-  app.use((_req, res, next) => {
-    const origin = _req.header("Origin");
-    res.setHeader("Access-Control-Allow-Origin", origin || "*");
+  // CORS first: explicit origins so Vercel serverless always sends the header
+  app.use((req, res, next) => {
+    const origin = req.header("Origin");
+    const allowOrigin =
+      origin && ALLOWED_ORIGINS.includes(origin) ? origin : ALLOWED_ORIGINS[0];
+    res.setHeader("Access-Control-Allow-Origin", allowOrigin);
     res.setHeader("Access-Control-Allow-Credentials", "true");
-    res.setHeader("Access-Control-Allow-Methods", "GET, POST, PUT, PATCH, DELETE, OPTIONS");
+    res.setHeader(
+      "Access-Control-Allow-Methods",
+      "GET, POST, PUT, PATCH, DELETE, OPTIONS",
+    );
     res.setHeader("Access-Control-Allow-Headers", "Content-Type, Authorization");
-    if (_req.method === "OPTIONS") {
+    if (req.method === "OPTIONS") {
       return res.sendStatus(204);
     }
     next();
@@ -23,7 +39,10 @@ export const createApp = () => {
 
   app.use(
     cors({
-      origin: true,
+      origin: (origin, cb) => {
+        if (!origin || ALLOWED_ORIGINS.includes(origin)) return cb(null, true);
+        return cb(null, ALLOWED_ORIGINS[0]);
+      },
       credentials: true,
       methods: ["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
       allowedHeaders: ["Content-Type", "Authorization"],

@@ -1,10 +1,10 @@
 #!/usr/bin/env bash
-# Push backend to AstraDaily-Backend repo for separate deployment (e.g. Railway).
+# Push backend to Aitriplebackend repo only.
 # Run from repo root: ./scripts/push-backend.sh
 
 set -e
 REPO_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
-BACKEND_REPO="${1:-https://github.com/dipennapit123/AstraDaily-Backend.git}"
+BACKEND_REPO="${1:-https://github.com/dipennapit123/Aitriplebackend.git}"
 BRANCH="${2:-main}"
 WORK_DIR="${REPO_ROOT}/.deploy-backend"
 
