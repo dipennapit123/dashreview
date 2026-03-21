@@ -20,7 +20,11 @@ export async function getUserIdFromRequest(): Promise<string> {
         throw new ApiError(401, "Invalid token.");
       }
       return decoded.uid;
-    } catch {
+    } catch (e) {
+      console.error(
+        "[user-auth] Firebase verifyIdToken failed:",
+        e instanceof Error ? e.message : e,
+      );
       throw new ApiError(401, "Invalid token.");
     }
   }
