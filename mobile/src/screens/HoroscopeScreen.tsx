@@ -13,7 +13,7 @@ import { recordActivity } from "../services/activity";
 import { useSessionStore } from "../store/useSessionStore";
 import type { Horoscope } from "../types";
 import { HoroscopeCard } from "../components/HoroscopeCard";
-import { useNavigation } from "@react-navigation/native";
+import { useFocusEffect, useNavigation } from "@react-navigation/native";
 import type { NativeStackNavigationProp } from "@react-navigation/native-stack";
 import type { RootStackParamList } from "../AppNavigator";
 import { Ionicons } from "@expo/vector-icons";
@@ -26,22 +26,26 @@ export const HoroscopeScreen: React.FC = () => {
   const defaultDayMode = useSessionStore((s) => s.defaultDayMode);
   const setDefaultDayMode = useSessionStore((s) => s.setDefaultDayMode);
   const cachedHistory = useSessionStore((s) => s.history);
+  const cachedHistoryZodiac = useSessionStore((s) => s.historyZodiac);
   const setHistoryStore = useSessionStore((s) => s.setHistory);
   const navigation =
     useNavigation<NativeStackNavigationProp<RootStackParamList>>();
-  const [loading, setLoading] = useState(cachedHistory.length === 0);
+  const initialHistory =
+    zodiacSign && cachedHistoryZodiac === zodiacSign ? cachedHistory : [];
+  const [loading, setLoading] = useState(initialHistory.length === 0);
   const [refreshing, setRefreshing] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  const [history, setHistory] = useState<Horoscope[]>(cachedHistory);
+  const [history, setHistory] = useState<Horoscope[]>(initialHistory);
   const [dayMode, setDayMode] = useState<DayMode>(defaultDayMode);
   const horoscopeViewRecorded = useRef(false);
   const loadInFlight = useRef(false);
+  const syncZodiacRetried = useRef(false);
 
-  const loadHistory = useCallback(async () => {
+  const loadHistory = useCallback(async (options?: { background?: boolean }) => {
     if (!userId || loadInFlight.current) return;
     loadInFlight.current = true;
-    const hasCache = useSessionStore.getState().history.length > 0;
-    setLoading(!hasCache);
+    const background = options?.background ?? false;
+    if (!background) setLoading(true);
     setError(null);
     try {
       const res = await api.get<{ success: boolean; data: Horoscope[] }>(
@@ -52,21 +56,55 @@ export const HoroscopeScreen: React.FC = () => {
       );
       const data = res.data.data ?? [];
       setHistory(data);
-      setHistoryStore(data);
+      setHistoryStore(data, zodiacSign ?? null);
     } catch (err: unknown) {
       const msg =
         (err as { response?: { data?: { error?: { message?: string } } } })
           ?.response?.data?.error?.message ?? "Failed to load horoscope.";
-      setError(msg);
+      const isZodiacNotSet = typeof msg === "string" && msg.toLowerCase().includes("zodiac sign not set");
+      const localZodiac = useSessionStore.getState().zodiacSign;
+      if (isZodiacNotSet && localZodiac && !syncZodiacRetried.current && userId) {
+        syncZodiacRetried.current = true;
+        loadInFlight.current = false;
+        try {
+          await api.patch(
+            "/users/zodiac",
+            { zodiacSign: localZodiac },
+            { headers: { "x-clerk-user-id": userId } },
+          );
+          void loadHistory(options);
+          return;
+        } catch {
+          setError(msg);
+        }
+      } else {
+        setError(msg);
+      }
     } finally {
-      setLoading(false);
+      if (!background) setLoading(false);
       loadInFlight.current = false;
     }
-  }, [userId, setHistoryStore]);
+  }, [userId, setHistoryStore, zodiacSign]);
 
   useEffect(() => {
-    void loadHistory();
-  }, [userId, loadHistory]);
+    syncZodiacRetried.current = false;
+    const nextHistory =
+      zodiacSign && cachedHistoryZodiac === zodiacSign ? cachedHistory : [];
+    setHistory(nextHistory);
+    setLoading(nextHistory.length === 0);
+    if (!userId || !zodiacSign) {
+      setLoading(false);
+      return;
+    }
+    void loadHistory({ background: nextHistory.length > 0 });
+  }, [userId, zodiacSign, loadHistory, cachedHistory, cachedHistoryZodiac]);
+
+  useFocusEffect(
+    useCallback(() => {
+      if (!userId || !zodiacSign) return;
+      void loadHistory({ background: history.length > 0 });
+    }, [userId, zodiacSign, loadHistory]),
+  );
 
   const onRefresh = useCallback(async () => {
     setRefreshing(true);
@@ -176,7 +214,11 @@ export const HoroscopeScreen: React.FC = () => {
       {loading && <View className="h-56 rounded-3xl bg-surfaceMuted" />}
 
       {error && !loading && (
-        <Text className="text-xs text-red-300">{error}</Text>
+        <Text className="text-xs text-red-300">
+          {error.includes("zodiac sign not set")
+            ? "Set your zodiac sign in Settings to see your horoscope."
+            : error}
+        </Text>
       )}
 
       {!loading && !error && activeHoroscope && (

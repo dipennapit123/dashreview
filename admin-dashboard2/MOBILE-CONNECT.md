@@ -2,6 +2,8 @@
 
 The mobile app (Expo + Clerk) talks to this Next.js app’s API so you can use one backend for both the admin dashboard and the app.
 
+**You do not need to configure the mobile app with Supabase.** Only this backend (admin-dashboard2) connects to Supabase. The mobile only needs `EXPO_PUBLIC_API_BASE_URL` and `EXPO_PUBLIC_CLERK_PUBLISHABLE_KEY`; all data (users, horoscopes) goes through this API.
+
 ## 1. Clerk (same app as mobile)
 
 Use the **same** Clerk application for the mobile app and for JWT verification here.
@@ -27,7 +29,7 @@ In `mobile/.env`:
 
 - `EXPO_PUBLIC_CLERK_PUBLISHABLE_KEY` — same as in Clerk Dashboard (you likely have this already).
 - `EXPO_PUBLIC_API_BASE_URL` — base URL of this app’s API:
-  - **Production (after hosting on Vercel):** `https://YOUR_PROJECT.vercel.app/api`
+  - **Production (hosted):** `https://astradailyadmin.org/api`
   - Same machine: `http://localhost:3000/api`
   - Device/simulator on LAN: `http://<your-machine-IP>:3000/api` (e.g. `http://192.168.1.69:3000/api`)
 
@@ -55,6 +57,6 @@ Admin routes (`/api/admin/*`) continue to use the existing admin JWT (or `ALLOW_
 1. In Vercel, set all env vars from `.env.example` (see **VERCEL-DEPLOY.md**). Do **not** set `ALLOW_ANONYMOUS_ADMIN` in production.
 2. In `mobile/.env`, set:
    ```env
-   EXPO_PUBLIC_API_BASE_URL="https://YOUR_PROJECT.vercel.app/api"
+   EXPO_PUBLIC_API_BASE_URL="https://astradailyadmin.org/api"
    ```
 3. Rebuild or restart the mobile app so it uses the new API URL.

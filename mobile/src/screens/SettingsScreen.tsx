@@ -3,18 +3,18 @@ import { View, Text, TouchableOpacity, ScrollView, Image, ActivityIndicator } fr
 import { useSessionStore } from "../store/useSessionStore";
 import type { NativeStackScreenProps } from "@react-navigation/native-stack";
 import type { RootStackParamList } from "../AppNavigator";
-import { useClerk, useUser } from "@clerk/clerk-expo";
 import { Ionicons } from "@expo/vector-icons";
 import { useToast } from "../context/ToastContext";
 import { recordActivity } from "../services/activity";
+import { firebaseAuth } from "../services/firebase";
+import { onAuthStateChanged, signOut } from "firebase/auth";
 
 type Props = NativeStackScreenProps<RootStackParamList, "Main">;
 
 export const SettingsScreen: React.FC<Props> = ({ navigation }) => {
-  const { signOut } = useClerk();
-  const { user } = useUser();
   const toast = useToast();
   const [isLoggingOut, setIsLoggingOut] = useState(false);
+  const [firebaseUser, setFirebaseUser] = useState(() => firebaseAuth.currentUser);
   const clerkUserId = useSessionStore((s) => s.clerkUserId);
   const logout = useSessionStore((s) => s.logout);
   const setZodiacSign = useSessionStore((s) => s.setZodiacSign);
@@ -26,6 +26,13 @@ export const SettingsScreen: React.FC<Props> = ({ navigation }) => {
   useEffect(() => {
     if (clerkUserId) recordActivity(clerkUserId, "SETTINGS_VIEW");
   }, [clerkUserId]);
+
+  useEffect(() => {
+    const unsub = onAuthStateChanged(firebaseAuth, (user) => {
+      setFirebaseUser(user);
+    });
+    return unsub;
+  }, []);
 
   const handleChangeSign = () => {
     setZodiacSign(null as any);
@@ -63,9 +70,9 @@ export const SettingsScreen: React.FC<Props> = ({ navigation }) => {
         <View className="items-center gap-4 mb-8">
           <View className="relative">
             <View className="h-24 w-24 rounded-full border-2 border-primary/50 p-1 bg-primary/20 items-center justify-center overflow-hidden">
-              {user?.imageUrl ? (
+              {firebaseUser?.photoURL ? (
                 <Image
-                  source={{ uri: user.imageUrl }}
+                  source={{ uri: firebaseUser.photoURL }}
                   className="w-full h-full rounded-full"
                   resizeMode="cover"
                 />
@@ -81,10 +88,10 @@ export const SettingsScreen: React.FC<Props> = ({ navigation }) => {
           </View>
           <View className="items-center">
             <Text className="text-2xl font-funky-bold text-text leading-tight" numberOfLines={1}>
-              {user?.fullName?.trim() || [user?.firstName, user?.lastName].filter(Boolean).join(" ") || user?.primaryEmailAddress?.emailAddress || "Astro Explorer"}
+              {firebaseUser?.displayName?.trim() || firebaseUser?.email || "Astro Explorer"}
             </Text>
             <Text className="text-sm text-textMuted">
-              {user?.primaryEmailAddress?.emailAddress || "Your cosmic profile"}
+              {firebaseUser?.email || "Your cosmic profile"}
             </Text>
           </View>
         </View>
@@ -229,7 +236,7 @@ export const SettingsScreen: React.FC<Props> = ({ navigation }) => {
           onPress={async () => {
             setIsLoggingOut(true);
             try {
-              await signOut();
+              await signOut(firebaseAuth);
             } catch {
               // continue to clear app state
             }

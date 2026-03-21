@@ -4,18 +4,42 @@
     "slug": "astradaily",
     "version": "1.0.0",
     "orientation": "portrait",
-    "platforms": ["ios", "android", "web"],
+    "platforms": [
+      "ios",
+      "android",
+      "web"
+    ],
     "sdkVersion": "54.0.0",
     "jsEngine": "hermes",
     "scheme": "astradaily",
-    "assetBundlePatterns": ["**/*"],
+    "assetBundlePatterns": [
+      "**/*"
+    ],
     "icon": "./assets/icon.png",
+    "ios": {
+      "bundleIdentifier": "com.dipennapit.astradaily",
+      "buildNumber": "1"
+    },
+    "splash": {
+      "image": "./assets/splash-icon.png",
+      "resizeMode": "contain",
+      "backgroundColor": "#1a0a2e"
+    },
     "android": {
+      "package": "com.dipennapit.astradaily",
+      "versionCode": 1,
       "adaptiveIcon": {
-        "foregroundImage": "./assets/icon.png",
+        "foregroundImage": "./assets/adaptive-icon.png",
         "backgroundColor": "#1a0a2e"
       }
-    }
+    },
+    "extra": {
+      "eas": {
+        "projectId": "1876d397-8952-4612-b7de-63689f3eaa6e"
+      }
+    },
+    "plugins": [
+      "expo-web-browser"
+    ]
   }
 }
-

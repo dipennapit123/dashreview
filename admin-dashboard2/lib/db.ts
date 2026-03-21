@@ -2,6 +2,14 @@ import { Pool } from "pg";
 
 const isVercel = process.env.VERCEL === "1";
 
+/** If URL is Supabase pooler host but port 5432, return same URL with port 6543 (Session pooler port). */
+function ensurePoolerPort(url: string): string {
+  if (!url.includes("pooler.supabase.com")) return url;
+  // Supabase Session pooler uses 6543; 5432 on pooler host often fails from serverless
+  if (url.includes(":5432/")) return url.replace(":5432/", ":6543/");
+  return url;
+}
+
 function getDatabaseUrls(): string[] {
   const primary =
     process.env.DATABASE_URL ||
@@ -14,15 +22,46 @@ function getDatabaseUrls(): string[] {
 
   const urls: string[] = [];
   const add = (url: string) => {
-    if (url.trim() && !url.startsWith("${{")) urls.push(url.trim());
+    const trimmed = url.trim();
+    if (!trimmed || trimmed.startsWith("${{")) return;
+    // Supabase pooler with 5432 fails from serverless; try 6543 first
+    if (trimmed.includes("pooler.supabase.com") && trimmed.includes(":5432/")) {
+      urls.push(ensurePoolerPort(trimmed));
+    }
+    urls.push(trimmed);
   };
 
-  // On Vercel, prefer pooler first (recommended for serverless)
+  // On Vercel, prefer pooler first (recommended for serverless; use port 6543 for Supabase Session pooler)
   if (isVercel && pooler) add(pooler);
   if (primary) add(primary);
   if (!isVercel && pooler) add(pooler);
 
-  return urls;
+  // Dedupe so we don't try same URL twice (e.g. primary and pooler were same)
+  return [...new Set(urls)];
+}
+
+/** True if this error should trigger trying the next connection URL (fallback). */
+function isConnectionError(err: unknown): boolean {
+  const msg = err instanceof Error ? err.message : String(err);
+  const code = (err as NodeJS.ErrnoException)?.code;
+  const lower = msg.toLowerCase();
+  if (code && ["ECONNREFUSED", "ENOTFOUND", "ECONNRESET", "ETIMEDOUT"].includes(code)) return true;
+  return (
+    lower.includes("enotfound") ||
+    lower.includes("econnrefused") ||
+    lower.includes("econnreset") ||
+    lower.includes("etimedout") ||
+    lower.includes("tenant or user not found") ||
+    lower.includes("connection terminated") ||
+    lower.includes("timeout") ||
+    lower.includes("socket hang up") ||
+    lower.includes("getaddrinfo") ||
+    lower.includes("connection refused")
+  );
+}
+
+function maskUrl(url: string): string {
+  return url.replace(/:[^:@]+@/, ":****@");
 }
 
 let _pool: Pool | null = null;
@@ -30,11 +69,12 @@ let _currentUrl: string | null = null;
 
 function createPool(url: string): Pool {
   const max = isVercel ? 2 : 5;
+  const connectionTimeoutMillis = isVercel ? 10000 : 6000;
   return new Pool({
     connectionString: url,
     max,
     idleTimeoutMillis: isVercel ? 10000 : 20000,
-    connectionTimeoutMillis: 6000,
+    connectionTimeoutMillis,
     ssl: { rejectUnauthorized: false },
   });
 }
@@ -42,8 +82,14 @@ function createPool(url: string): Pool {
 export function getPool(): Pool | null {
   if (_pool) return _pool;
   const urls = getDatabaseUrls();
-  if (urls.length === 0) return null;
+  if (urls.length === 0) {
+    console.error("[db] No DATABASE_URL or DATABASE_URL_POOLER set. Set env in Vercel → Settings → Environment Variables.");
+    return null;
+  }
   _currentUrl = urls[0];
+  if (isVercel) {
+    console.log("[db] Using URL (masked):", maskUrl(_currentUrl), "poolerFirst=", !!process.env.DATABASE_URL_POOLER);
+  }
   _pool = createPool(_currentUrl);
   return _pool;
 }
@@ -60,47 +106,42 @@ export async function query<T = unknown>(
 ): Promise<{ rows: T[]; rowCount: number }> {
   let p = getPool();
   if (!p) {
-    throw new Error(
-      "Database not configured: set DATABASE_URL or DATABASE_URL_POOLER."
-    );
+    const msg = "Database not configured: set DATABASE_URL or DATABASE_URL_POOLER.";
+    console.error("[db]", msg);
+    throw new Error(msg);
   }
 
   try {
     const result = await p.query(text, values);
     return { rows: result.rows as T[], rowCount: result.rowCount ?? 0 };
   } catch (err: unknown) {
-    const msg =
-      err instanceof Error ? err.message : String(err);
-    const isConnectionError =
-      msg.includes("ENOTFOUND") ||
-      msg.includes("ECONNREFUSED") ||
-      msg.includes("Tenant or user not found") ||
-      msg.includes("connection terminated") ||
-      msg.includes("timeout");
+    const msg = err instanceof Error ? err.message : String(err);
+    const code = (err as NodeJS.ErrnoException)?.code;
+    console.error("[db] Query failed message=", msg, "code=", code ?? "(none)");
 
-    if (!isConnectionError) throw err;
+    if (!isConnectionError(err)) throw err;
 
-    console.warn(`[db] Primary connection failed (${msg}), trying fallback…`);
+    console.warn("[db] Primary connection failed, trying fallback URLs…");
 
     const urls = getDatabaseUrls();
     for (const url of urls) {
       if (url === _currentUrl) continue;
       try {
-        console.log(`[db] Trying fallback: ${url.replace(/:[^:@]+@/, ':***@')}`);
+        console.log("[db] Trying fallback:", maskUrl(url));
         const newPool = await tryConnect(url);
-        // Fallback works — swap it in
         await _pool?.end().catch(() => {});
         _pool = newPool;
         _currentUrl = url;
         const result = await _pool.query(text, values);
         return { rows: result.rows as T[], rowCount: result.rowCount ?? 0 };
       } catch (fallbackErr) {
-        const fbMsg =
-          fallbackErr instanceof Error ? fallbackErr.message : String(fallbackErr);
-        console.warn(`[db] Fallback also failed: ${fbMsg}`);
+        const fbMsg = fallbackErr instanceof Error ? fallbackErr.message : String(fallbackErr);
+        const fbCode = (fallbackErr as NodeJS.ErrnoException)?.code;
+        console.warn("[db] Fallback failed:", fbMsg, "code=", fbCode ?? "(none)");
       }
     }
 
+    console.error("[db] All connections failed. Original error:", msg, "code=", code);
     throw err;
   }
 }

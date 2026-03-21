@@ -3,8 +3,10 @@ import { View, Text, StyleSheet } from "react-native";
 import type { NativeStackScreenProps } from "@react-navigation/native-stack";
 import type { RootStackParamList } from "../AppNavigator";
 import { useSessionStore } from "../store/useSessionStore";
-import { useAuth, useUser } from "@clerk/clerk-expo";
 import { ZodiacLogoRing } from "../components/ZodiacLogoRing";
+import { bootstrapSessionProfile } from "../services/session";
+import { loadTermsConsent } from "../services/consent";
+import { firebaseAuth } from "../services/firebase";
 
 type Props = NativeStackScreenProps<RootStackParamList, "Splash">;
 
@@ -14,15 +16,16 @@ const BACKGROUND_DARK = "#191022";
 export const SplashScreen: React.FC<Props> = ({ navigation }) => {
   const token = useSessionStore((s) => s.token);
   const zodiacSign = useSessionStore((s) => s.zodiacSign);
+  const termsAccepted = useSessionStore((s) => s.termsAccepted);
+  const consentLoaded = useSessionStore((s) => s.consentLoaded);
   const setAuth = useSessionStore((s) => s.setAuth);
-  const { isLoaded, isSignedIn, getToken } = useAuth();
-  const { user } = useUser();
+  const setZodiacSign = useSessionStore((s) => s.setZodiacSign);
+  const setTermsAccepted = useSessionStore((s) => s.setTermsAccepted);
+  const setConsentLoaded = useSessionStore((s) => s.setConsentLoaded);
   const hasNavigated = useRef(false);
 
   useEffect(() => {
-    if (!isLoaded || hasNavigated.current) return;
-
-    let timeoutId: ReturnType<typeof setTimeout> | undefined;
+    if (hasNavigated.current) return;
 
     const navigateToDestination = (hasAuth: boolean) => {
       if (hasNavigated.current) return;
@@ -37,37 +40,85 @@ export const SplashScreen: React.FC<Props> = ({ navigation }) => {
     };
 
     const run = async () => {
+      let accepted = termsAccepted;
+      if (!consentLoaded) {
+        accepted = await loadTermsConsent();
+        setTermsAccepted(accepted);
+        setConsentLoaded(true);
+      }
+
       let hasAuth = !!token;
-      if (isSignedIn && user && !token) {
+      const resolvedZodiacSign = zodiacSign;
+      const currentUser = firebaseAuth.currentUser;
+      if (currentUser && !token) {
         try {
-          const jwt = await getToken();
-          if (jwt && user.id) {
-            setAuth({ clerkUserId: user.id, token: jwt });
+          const jwt = await currentUser.getIdToken();
+          if (jwt) {
+            setAuth({ clerkUserId: currentUser.uid, token: jwt });
+            // Do not block navigation on network/bootstrap.
+            void bootstrapSessionProfile({
+              clerkUserId: currentUser.uid,
+              token: jwt,
+              email: currentUser.email ?? "",
+              fullName: currentUser.displayName ?? "",
+              avatarUrl: currentUser.photoURL ?? undefined,
+            })
+              .then((profile) => {
+                setZodiacSign(profile.zodiacSign);
+              })
+              .catch(() => {
+                // ignore bootstrap errors at startup
+              });
             hasAuth = true;
           }
         } catch {
           // ignore
         }
+      } else if (currentUser && token) {
+        hasAuth = true;
+        // Do not block navigation on network/bootstrap.
+        void bootstrapSessionProfile({
+          clerkUserId: currentUser.uid,
+          token,
+          email: currentUser.email ?? "",
+          fullName: currentUser.displayName ?? "",
+          avatarUrl: currentUser.photoURL ?? undefined,
+        })
+          .then((profile) => {
+            setZodiacSign(profile.zodiacSign);
+          })
+          .catch(() => {
+            // ignore bootstrap errors at startup
+          });
       }
 
-      if (isSignedIn || hasAuth) {
-        await new Promise((r) => setTimeout(r, 800));
-        navigateToDestination(!!hasAuth);
+      if (currentUser || hasAuth) {
+        if (hasAuth) {
+          if (hasNavigated.current) return;
+          hasNavigated.current = true;
+          if (!accepted) {
+            navigation.replace("Auth");
+            return;
+          }
+          if (!resolvedZodiacSign) {
+            navigation.replace("Onboarding");
+          } else {
+            navigation.replace("Main");
+          }
+          return;
+        }
+        navigateToDestination(false);
         return;
       }
 
-      timeoutId = setTimeout(() => {
-        if (hasNavigated.current) return;
-        hasNavigated.current = true;
-        navigation.replace("Auth");
-      }, 5500);
+      // No auth state present: navigate immediately.
+      if (hasNavigated.current) return;
+      hasNavigated.current = true;
+      navigation.replace("Auth");
     };
 
     run();
-    return () => {
-      if (timeoutId) clearTimeout(timeoutId);
-    };
-  }, [isLoaded, isSignedIn, token, zodiacSign, navigation, user, getToken, setAuth]);
+  }, [token, zodiacSign, termsAccepted, consentLoaded, navigation, setAuth, setZodiacSign, setTermsAccepted, setConsentLoaded]);
 
   return (
     <View style={styles.container}>

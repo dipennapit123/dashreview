@@ -1,42 +1,32 @@
-import jwt from "jsonwebtoken";
-import JwksClient from "jwks-rsa";
 import { headers } from "next/headers";
 import { env } from "./env";
 import { ApiError } from "./api-error";
+import { firebaseAdminAuth } from "./firebase-admin";
 
 /**
- * Verifies Clerk JWT (Bearer token) via JWKS and returns the Clerk user id (sub).
- * Used by mobile app and any client using Clerk auth.
+ * Verifies Firebase ID token (Authorization: Bearer <token>) and returns uid.
+ * For local/dev fallback only, x-clerk-user-id is accepted when explicitly enabled.
  */
 export async function getUserIdFromRequest(): Promise<string> {
   const h = await headers();
   const authHeader = h.get("authorization");
   const headerUserId = h.get("x-clerk-user-id");
 
-  if (authHeader?.startsWith("Bearer ") && env.clerkJwtIssuer) {
-    const token = authHeader.slice("Bearer ".length);
-    const jwks = JwksClient({
-      jwksUri: `${env.clerkJwtIssuer}/.well-known/jwks.json`,
-      cache: true,
-      rateLimit: true,
-    });
-    const decoded = jwt.decode(token, { complete: true }) as
-      | { header: { kid?: string }; payload: { sub?: string } }
-      | null;
-    if (!decoded?.header?.kid || !decoded?.payload?.sub) {
+  if (authHeader?.startsWith("Bearer ")) {
+    try {
+      const token = authHeader.slice("Bearer ".length);
+      const decoded = await firebaseAdminAuth.verifyIdToken(token, true);
+      if (!decoded?.uid) {
+        throw new ApiError(401, "Invalid token.");
+      }
+      return decoded.uid;
+    } catch {
       throw new ApiError(401, "Invalid token.");
     }
-    const key = await jwks.getSigningKey(decoded.header.kid);
-    const publicKey = key.getPublicKey();
-    jwt.verify(token, publicKey, {
-      algorithms: ["RS256"],
-      issuer: env.clerkJwtIssuer,
-      ...(env.clerkJwtAudience ? { audience: env.clerkJwtAudience } : {}),
-    });
-    return decoded.payload.sub;
   }
 
-  if (headerUserId) {
+  // Optional fallback for local testing only.
+  if (process.env.ALLOW_HEADER_USER_ID_FALLBACK === "true" && headerUserId) {
     return headerUserId;
   }
 

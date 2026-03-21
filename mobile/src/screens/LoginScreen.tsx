@@ -1,4 +1,7 @@
-import React, { useState } from "react";
+import React, { useEffect, useMemo, useState } from "react";
+import * as AuthSession from "expo-auth-session";
+import * as WebBrowser from "expo-web-browser";
+import * as Google from "expo-auth-session/providers/google";
 import {
   View,
   Text,
@@ -11,54 +14,187 @@ import {
 import type { NativeStackScreenProps } from "@react-navigation/native-stack";
 import type { RootStackParamList } from "../AppNavigator";
 import { useSessionStore } from "../store/useSessionStore";
-import { api } from "../services/api";
-import { getTimezone } from "../services/activity";
-import { useOAuth, useAuth, useUser } from "@clerk/clerk-expo";
 import { Ionicons } from "@expo/vector-icons";
 import { ZodiacLogoRing } from "../components/ZodiacLogoRing";
+import { bootstrapSessionProfile } from "../services/session";
+import { LegalDocumentModal } from "../components/LegalDocumentModal";
+import { loadTermsConsent, saveTermsConsent } from "../services/consent";
+import { firebaseAuth } from "../services/firebase";
+import { GoogleAuthProvider, onAuthStateChanged, signInWithCredential } from "firebase/auth";
 
 type Props = NativeStackScreenProps<RootStackParamList, "Auth">;
+
+WebBrowser.maybeCompleteAuthSession();
 
 const PRIMARY = "#7f13ec";
 const BACKGROUND_DARK = "#191022";
 
+const TERMS_SECTIONS = [
+  {
+    title: "Acceptance and eligibility",
+    bullets: [
+      "By using AstraDaily, you agree to these Terms of Service.",
+      "You must only use the app in a lawful and respectful way.",
+      "If you do not agree, you should not continue into the app.",
+    ],
+  },
+  {
+    title: "Entertainment use only",
+    bullets: [
+      "Horoscope content in AstraDaily is AI-generated for entertainment and general inspiration.",
+      "It is not medical, legal, mental health, relationship, or financial advice.",
+      "You remain responsible for decisions you make based on app content.",
+    ],
+  },
+  {
+    title: "App usage",
+    bullets: [
+      "Do not misuse, disrupt, or attempt to abuse the app or its services.",
+      "Features may change, improve, or become unavailable over time.",
+      "We may limit or suspend access if the app is used improperly.",
+    ],
+  },
+  {
+    title: "Liability and contact",
+    bullets: [
+      "The app is provided as-is without guarantees of uninterrupted availability.",
+      "We are not responsible for indirect losses caused by reliance on horoscope content.",
+      "Questions about these terms can be directed through the app support contact when available.",
+    ],
+  },
+] as const;
+
+const PRIVACY_SECTIONS = [
+  {
+    title: "Information we collect",
+    bullets: [
+      "We collect basic account information from Google sign-in, such as your name, email, and profile image.",
+      "We store your selected zodiac sign and limited app activity related to horoscope usage.",
+      "We may collect technical information needed to keep the app working reliably.",
+    ],
+  },
+  {
+    title: "How we use information",
+    bullets: [
+      "We use your data to sign you in, personalize horoscopes, and support app features.",
+      "We use limited analytics and activity information to improve app quality and understand engagement.",
+      "We do not state that we sell your personal data.",
+    ],
+  },
+  {
+    title: "Third-party services",
+    bullets: [
+      "Authentication is handled through Firebase Authentication and Google sign-in.",
+      "App data may be stored using our hosting, database, and infrastructure providers.",
+      "Those providers may process data only as needed to support the service.",
+    ],
+  },
+  {
+    title: "Retention and your choices",
+    bullets: [
+      "We keep data only as long as reasonably needed to operate and improve the app.",
+      "Clearing the app or reinstalling it may remove local settings such as consent storage on your device.",
+      "More detailed account deletion or support flows can be added later as the product grows.",
+    ],
+  },
+] as const;
+
 export const LoginScreen: React.FC<Props> = ({ navigation }) => {
   const setAuth = useSessionStore((s) => s.setAuth);
+  const setZodiacSign = useSessionStore((s) => s.setZodiacSign);
+  const termsAccepted = useSessionStore((s) => s.termsAccepted);
+  const consentLoaded = useSessionStore((s) => s.consentLoaded);
+  const setTermsAccepted = useSessionStore((s) => s.setTermsAccepted);
+  const setConsentLoaded = useSessionStore((s) => s.setConsentLoaded);
   const token = useSessionStore((s) => s.token);
   const clerkUserId = useSessionStore((s) => s.clerkUserId);
   const zodiacSign = useSessionStore((s) => s.zodiacSign);
-  const { startOAuthFlow } = useOAuth({ strategy: "oauth_google" });
-  const { isSignedIn, getToken } = useAuth();
-  const { user } = useUser();
 
   const [isLoading, setIsLoading] = useState(false);
+  const [activeLegalDoc, setActiveLegalDoc] = useState<"terms" | "privacy" | null>(null);
+  const [firebaseUser, setFirebaseUser] = useState(() => firebaseAuth.currentUser);
+  const redirectUrl = useMemo(
+    () =>
+      AuthSession.makeRedirectUri({
+        native: "astradaily://oauth-native-callback",
+      }),
+    []
+  );
+  const [googleRequest, googleResponse, promptGoogle] = Google.useAuthRequest({
+    responseType: AuthSession.ResponseType.IdToken,
+    webClientId: process.env.EXPO_PUBLIC_GOOGLE_WEB_CLIENT_ID,
+    androidClientId: process.env.EXPO_PUBLIC_GOOGLE_ANDROID_CLIENT_ID,
+    iosClientId: process.env.EXPO_PUBLIC_GOOGLE_IOS_CLIENT_ID,
+    redirectUri: redirectUrl,
+    scopes: ["openid", "profile", "email"],
+  });
 
-  const showContinueButton = (isSignedIn && !!user) || !!(token && clerkUserId);
+  const showContinueButton = !!firebaseUser || !!(token && clerkUserId);
+  const authDisabled = isLoading || !consentLoaded || !termsAccepted;
+
+  useEffect(() => {
+    void WebBrowser.warmUpAsync();
+    return () => {
+      void WebBrowser.coolDownAsync();
+    };
+  }, []);
+
+  useEffect(() => {
+    const unsub = onAuthStateChanged(firebaseAuth, (user) => {
+      setFirebaseUser(user);
+    });
+    return unsub;
+  }, []);
+
+  useEffect(() => {
+    if (consentLoaded) return;
+    let mounted = true;
+    void loadTermsConsent().then((accepted) => {
+      if (!mounted) return;
+      setTermsAccepted(accepted);
+      setConsentLoaded(true);
+    });
+    return () => {
+      mounted = false;
+    };
+  }, [consentLoaded, setConsentLoaded, setTermsAccepted]);
+
+  const toggleConsent = async () => {
+    const nextValue = !termsAccepted;
+    setTermsAccepted(nextValue);
+    await saveTermsConsent(nextValue);
+  };
 
   const handleContinue = async () => {
-    const route = zodiacSign ? { name: "Main" as const } : { name: "Onboarding" as const };
-
+    if (authDisabled) return;
     if (token && clerkUserId) {
+      const route = zodiacSign ? { name: "Main" as const } : { name: "Onboarding" as const };
       navigation.reset({ index: 0, routes: [route] });
       return;
     }
 
-    if (!user) return;
+    if (!firebaseUser) return;
     try {
-      const jwt = await getToken();
+      const jwt = await firebaseUser.getIdToken();
       if (!jwt) return;
+      let resolvedZodiacSign = zodiacSign;
+      setAuth({ clerkUserId: firebaseUser.uid, token: jwt });
       try {
-        await api.post("/users/sync-clerk-user", {
-          clerkUserId: user.id,
-          email: user.primaryEmailAddress?.emailAddress ?? "",
-          fullName: `${user.firstName ?? ""} ${user.lastName ?? ""}`.trim(),
-          avatarUrl: user.imageUrl,
-          timezone: getTimezone(),
+        const profile = await bootstrapSessionProfile({
+          clerkUserId: firebaseUser.uid,
+          token: jwt,
+          email: firebaseUser.email ?? "",
+          fullName: firebaseUser.displayName ?? "",
+          avatarUrl: firebaseUser.photoURL ?? undefined,
         });
+        resolvedZodiacSign = profile.zodiacSign;
+        setZodiacSign(profile.zodiacSign);
       } catch {
         // ignore
       }
-      setAuth({ clerkUserId: user.id, token: jwt });
+      const route = resolvedZodiacSign
+        ? { name: "Main" as const }
+        : { name: "Onboarding" as const };
       navigation.reset({ index: 0, routes: [route] });
     } catch {
       Alert.alert("Error", "Could not continue. Please try again.");
@@ -66,41 +202,15 @@ export const LoginScreen: React.FC<Props> = ({ navigation }) => {
   };
 
   const handleGoogleLogin = async () => {
+    if (authDisabled) return;
     setIsLoading(true);
     try {
-      const result = await startOAuthFlow();
-      const { createdSessionId, setActive } = result;
-
-      if (!createdSessionId) {
+      if (!googleRequest) {
         setIsLoading(false);
+        Alert.alert("Configuration error", "Google auth request is not ready yet. Try again.");
         return;
       }
-
-      if (setActive) {
-        await setActive({ session: createdSessionId });
-      }
-
-      try {
-        const jwt = await getToken();
-        if (jwt && user) {
-          try {
-            await api.post("/users/sync-clerk-user", {
-              clerkUserId: user.id,
-              email: user.primaryEmailAddress?.emailAddress ?? "",
-              fullName: `${user.firstName ?? ""} ${user.lastName ?? ""}`.trim(),
-              avatarUrl: user.imageUrl,
-              timezone: getTimezone(),
-            });
-          } catch {
-            // ignore
-          }
-          setAuth({ clerkUserId: user.id, token: jwt });
-        }
-      } catch {
-        // token may not be ready yet
-      }
-
-      setIsLoading(false);
+      await promptGoogle({ showInRecents: true });
     } catch (err: unknown) {
       setIsLoading(false);
       let message = "Unknown error";
@@ -114,7 +224,7 @@ export const LoginScreen: React.FC<Props> = ({ navigation }) => {
         else message = JSON.stringify(o);
       }
       if (__DEV__) {
-        console.warn("[Login] Google sign-in error:", message, err);
+        console.warn("[Login] Google sign-in error:", message, "redirectUri=", redirectUrl, err);
       }
       const isCancelled =
         typeof message === "string" &&
@@ -128,10 +238,58 @@ export const LoginScreen: React.FC<Props> = ({ navigation }) => {
           ? "Sign in was cancelled."
           : message && message.length < 120 && message !== "Unknown error"
             ? message
-            : "Could not complete Google sign in. Check your connection and that Google is enabled in the Clerk dashboard."
+            : "Could not complete Google sign in. Check Firebase and Google OAuth client IDs."
       );
     }
   };
+
+  useEffect(() => {
+    const completeGoogleSignIn = async () => {
+      if (!googleResponse) return;
+      if (googleResponse.type !== "success") {
+        if (googleResponse.type !== "dismiss" && googleResponse.type !== "cancel") {
+          Alert.alert("Sign in failed", "Google sign-in did not complete.");
+        }
+        setIsLoading(false);
+        return;
+      }
+
+      try {
+        const idToken = googleResponse.authentication?.idToken;
+        if (!idToken) throw new Error("Missing Google ID token.");
+
+        const credential = GoogleAuthProvider.credential(idToken);
+        const userCred = await signInWithCredential(firebaseAuth, credential);
+        const fbUser = userCred.user;
+        const jwt = await fbUser.getIdToken();
+
+        setAuth({ clerkUserId: fbUser.uid, token: jwt });
+
+        try {
+          const profile = await bootstrapSessionProfile({
+            clerkUserId: fbUser.uid,
+            token: jwt,
+            email: fbUser.email ?? "",
+            fullName: fbUser.displayName ?? "",
+            avatarUrl: fbUser.photoURL ?? undefined,
+          });
+          setZodiacSign(profile.zodiacSign);
+        } catch {
+          // ignore
+        }
+      } catch (err: unknown) {
+        const message = err instanceof Error ? err.message : "Unknown error";
+        Alert.alert(
+          "Sign in failed",
+          message && message.length < 120 ? message : "Firebase sign-in failed. Check Firebase and Google setup."
+        );
+      } finally {
+        setIsLoading(false);
+      }
+    };
+
+    void completeGoogleSignIn();
+  }, [googleResponse, setAuth, setZodiacSign]);
 
   return (
     <View style={styles.container}>
@@ -162,17 +320,58 @@ export const LoginScreen: React.FC<Props> = ({ navigation }) => {
           <View style={styles.authSection}>
             <Text style={styles.welcomeText}>Welcome back</Text>
 
+            <View style={styles.consentRow}>
+              <TouchableOpacity
+                activeOpacity={0.85}
+                onPress={() => {
+                  void toggleConsent();
+                }}
+                style={styles.checkbox}
+              >
+                <Ionicons
+                  name={termsAccepted ? "checkmark-circle" : "ellipse-outline"}
+                  size={22}
+                  color={termsAccepted ? PRIMARY : "rgba(148, 163, 184, 0.8)"}
+                />
+              </TouchableOpacity>
+              <Text style={styles.consentText}>
+                I agree to the{" "}
+                <Text
+                  style={styles.consentLink}
+                  onPress={() => setActiveLegalDoc("terms")}
+                >
+                  Terms of Service
+                </Text>{" "}
+                and{" "}
+                <Text
+                  style={styles.consentLink}
+                  onPress={() => setActiveLegalDoc("privacy")}
+                >
+                  Privacy Policy
+                </Text>
+                .
+              </Text>
+            </View>
+
+            {!termsAccepted && consentLoaded && (
+              <Text style={styles.consentHint}>
+                Please accept the Terms of Service and Privacy Policy to continue.
+              </Text>
+            )}
+
             <TouchableOpacity
-              style={styles.googleButton}
+              style={[styles.authButtonBase, styles.googleButton]}
               activeOpacity={0.85}
-              disabled={isLoading}
+              disabled={authDisabled}
               onPress={handleGoogleLogin}
             >
               {isLoading ? (
                 <ActivityIndicator size="small" color="#FFFFFF" />
               ) : (
                 <>
-                  <Ionicons name="logo-google" size={20} color="#FFFFFF" style={styles.googleIcon} />
+                  <View style={styles.googleIconWrap}>
+                    <Ionicons name="logo-google" size={20} color="#FFFFFF" style={styles.googleIcon} />
+                  </View>
                   <Text style={styles.googleButtonText}>Continue with Google</Text>
                 </>
               )}
@@ -180,8 +379,9 @@ export const LoginScreen: React.FC<Props> = ({ navigation }) => {
 
             {showContinueButton && (
               <TouchableOpacity
-                style={styles.continueButton}
+                style={[styles.authButtonBase, styles.continueButton]}
                 activeOpacity={0.9}
+                disabled={authDisabled}
                 onPress={handleContinue}
               >
                 <Text style={styles.continueButtonText}>Select sign</Text>
@@ -209,6 +409,27 @@ export const LoginScreen: React.FC<Props> = ({ navigation }) => {
           <Text style={styles.decorIcon3}>✹</Text>
         </View>
       </View>
+
+      <LegalDocumentModal
+        visible={activeLegalDoc === "terms"}
+        title="Terms of Service"
+        intro="These Terms explain how AstraDaily should be used and what users can expect from the app."
+        sections={TERMS_SECTIONS.map((section) => ({
+          title: section.title,
+          bullets: [...section.bullets],
+        }))}
+        onClose={() => setActiveLegalDoc(null)}
+      />
+      <LegalDocumentModal
+        visible={activeLegalDoc === "privacy"}
+        title="Privacy Policy"
+        intro="This Privacy Policy explains what information AstraDaily uses and how it supports the app experience."
+        sections={PRIVACY_SECTIONS.map((section) => ({
+          title: section.title,
+          bullets: [...section.bullets],
+        }))}
+        onClose={() => setActiveLegalDoc(null)}
+      />
     </View>
   );
 };
@@ -287,40 +508,80 @@ const styles = StyleSheet.create({
     color: "#e2e8f0",
     marginBottom: 20,
   },
-  googleButton: {
+  consentRow: {
+    width: "100%",
+    flexDirection: "row",
+    alignItems: "flex-start",
+    marginBottom: 10,
+    gap: 10,
+  },
+  checkbox: {
+    paddingTop: 1,
+  },
+  consentText: {
+    flex: 1,
+    color: "#CBD5E1",
+    fontSize: 13,
+    lineHeight: 20,
+  },
+  consentLink: {
+    color: "#C084FC",
+    fontWeight: "700",
+    textDecorationLine: "underline",
+  },
+  consentHint: {
+    width: "82%",
+    alignSelf: "center",
+    marginBottom: 12,
+    color: "rgba(248, 113, 113, 0.95)",
+    fontSize: 12,
+    lineHeight: 18,
+    textAlign: "center",
+  },
+  authButtonBase: {
     flexDirection: "row",
     alignItems: "center",
     justifyContent: "center",
     width: "100%",
     height: 56,
+    borderRadius: 28,
+    paddingHorizontal: 24,
+    alignSelf: "stretch",
+    position: "relative",
+  },
+  googleButton: {
     backgroundColor: "rgba(255, 255, 255, 0.1)",
     borderWidth: 1,
     borderColor: "rgba(255, 255, 255, 0.15)",
-    borderRadius: 28,
-    paddingHorizontal: 24,
     marginBottom: 12,
   },
+  googleIconWrap: {
+    position: "absolute",
+    left: 24,
+    top: 0,
+    bottom: 0,
+    justifyContent: "center",
+  },
   googleIcon: {
-    marginRight: 12,
   },
   googleButtonText: {
     color: "#FFFFFF",
     fontSize: 16,
     fontWeight: "600",
+    textAlign: "center",
+    width: "100%",
   },
   continueButton: {
-    width: "100%",
-    height: 56,
-    alignItems: "center",
-    justifyContent: "center",
     backgroundColor: PRIMARY,
-    borderRadius: 28,
-    paddingHorizontal: 24,
+    borderWidth: 1,
+    borderColor: "transparent",
   },
   continueButtonText: {
     color: "#FFFFFF",
     fontSize: 16,
     fontWeight: "700",
+    textAlign: "center",
+    width: "100%",
   },
   footer: {
     alignItems: "center",

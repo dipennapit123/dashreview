@@ -1,8 +1,8 @@
-import React, { useCallback, useRef } from "react";
-import { View, Text, TouchableOpacity, ScrollView, Platform, StyleSheet } from "react-native";
+import React, { useCallback, useRef, useState } from "react";
+import { View, Text, TouchableOpacity, ScrollView, Platform, StyleSheet, Alert, ActivityIndicator } from "react-native";
 import type { NativeStackScreenProps } from "@react-navigation/native-stack";
 import type { RootStackParamList } from "../AppNavigator";
-import type { ZodiacSign } from "../types";
+import type { Horoscope, ZodiacSign } from "../types";
 import { useSessionStore } from "../store/useSessionStore";
 import { api } from "../services/api";
 import { recordActivity } from "../services/activity";
@@ -197,15 +197,18 @@ export const ZodiacSelectionScreen: React.FC<Props> = ({ navigation, route }) =>
   const userId = useSessionStore((s) => s.clerkUserId);
   const storedZodiac = useSessionStore((s) => s.zodiacSign);
   const setZodiacSign = useSessionStore((s) => s.setZodiacSign);
+  const setHistory = useSessionStore((s) => s.setHistory);
   const [selected, setSelected] = React.useState<ZodiacSign | null>(
     storedZodiac ?? null,
   );
+  const [saving, setSaving] = useState(false);
   const lastTappedSign = useRef<ZodiacSign | null>(null);
   const lastTappedTime = useRef<number>(0);
 
   const saveSignAndNavigate = useCallback(
     async (sign: ZodiacSign, openHoroscopeTab?: boolean) => {
       if (userId) {
+        setSaving(true);
         try {
           await api.patch(
             "/users/zodiac",
@@ -213,23 +216,39 @@ export const ZodiacSelectionScreen: React.FC<Props> = ({ navigation, route }) =>
             { headers: { "x-clerk-user-id": userId } },
           );
           recordActivity(userId, "ZODIAC_SELECTED");
-        } catch {
-          // swallow
+        } catch (err: unknown) {
+          const msg =
+            (err as { response?: { data?: { error?: { message?: string } } } })
+              ?.response?.data?.error?.message ?? "Could not save your sign.";
+          setSaving(false);
+          Alert.alert("Could not save sign", msg + " Please try again.");
+          return;
         }
+        setSaving(false);
       }
       setZodiacSign(sign);
+      setHistory([], sign);
+      if (userId) {
+        void api
+          .get<{ success: boolean; data: Horoscope[] }>("/horoscopes/history", {
+            headers: { "x-clerk-user-id": userId },
+          })
+          .then((res) => {
+            setHistory(res.data.data ?? [], sign);
+          })
+          .catch(() => {
+            // Ignore prefetch failures; Horoscope screen will fetch normally.
+          });
+      }
       const isOnboarding = route.name === "Onboarding";
       if (isOnboarding) {
-        if (openHoroscopeTab) {
+        // Always open Horoscope tab so user sees their forecast immediately
         navigation.replace("Main", { screen: "Horoscope" as const });
-      } else {
-        navigation.replace("Main");
-      }
       } else {
         (navigation as { navigate: (name: string) => void }).navigate("Horoscope");
       }
     },
-    [userId, route.name, navigation, setZodiacSign]
+    [userId, route.name, navigation, setHistory, setZodiacSign]
   );
 
   const handleContinue = useCallback(async () => {
@@ -269,13 +288,17 @@ export const ZodiacSelectionScreen: React.FC<Props> = ({ navigation, route }) =>
           {/* right action button (same behavior as bottom CTA) */}
           <TouchableOpacity
             className={`h-12 w-12 rounded-full items-center justify-center bg-primary/20 ${
-              !selected ? "opacity-40" : ""
+              !selected || saving ? "opacity-40" : ""
             }`}
             onPress={handleContinue}
-            disabled={!selected}
+            disabled={!selected || saving}
             activeOpacity={0.9}
           >
-            <Ionicons name="arrow-forward" size={22} color="#F9FAFB" />
+            {saving ? (
+              <ActivityIndicator size="small" color="#F9FAFB" />
+            ) : (
+              <Ionicons name="arrow-forward" size={22} color="#F9FAFB" />
+            )}
           </TouchableOpacity>
         </View>
 
@@ -323,14 +346,18 @@ export const ZodiacSelectionScreen: React.FC<Props> = ({ navigation, route }) =>
           </View>
 
           <TouchableOpacity
-            style={[styles.continueButton, !selected && styles.continueButtonDisabled]}
-            disabled={!selected}
+            style={[styles.continueButton, (!selected || saving) && styles.continueButtonDisabled]}
+            disabled={!selected || saving}
             onPress={handleContinue}
             activeOpacity={0.9}
           >
-            <Text style={styles.continueButtonText}>
-              Continue to your forecast
-            </Text>
+            {saving ? (
+              <ActivityIndicator size="small" color="#FFFFFF" />
+            ) : (
+              <Text style={styles.continueButtonText}>
+                Continue to your forecast
+              </Text>
+            )}
           </TouchableOpacity>
 
           <Text className="text-center text-[11px] text-slate-500 pb-2">

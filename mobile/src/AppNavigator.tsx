@@ -4,7 +4,6 @@ import { NavigationContainer } from "@react-navigation/native";
 import { createNativeStackNavigator } from "@react-navigation/native-stack";
 import { createBottomTabNavigator } from "@react-navigation/bottom-tabs";
 import { Ionicons } from "@expo/vector-icons";
-import { SplashScreen } from "./screens/SplashScreen";
 import { LoginScreen } from "./screens/LoginScreen";
 import { ZodiacSelectionScreen } from "./screens/ZodiacSelectionScreen";
 import { HoroscopeScreen } from "./screens/HoroscopeScreen";
@@ -15,7 +14,6 @@ import { recordActivity } from "./services/activity";
 const APP_OPEN_THROTTLE_MS = 60_000; // At most one APP_OPEN per minute for accurate DAU without spam
 
 export type RootStackParamList = {
-  Splash: undefined;
   Auth: undefined;
   Onboarding: undefined;
   Main: { screen: "Horoscope" } | undefined;
@@ -108,7 +106,11 @@ export const AppNavigator = () => {
   const token = useSessionStore((s) => s.token);
   const zodiacSign = useSessionStore((s) => s.zodiacSign);
 
-  const initialRoute: keyof RootStackParamList = "Splash";
+  const initialRoute: keyof RootStackParamList = token
+    ? zodiacSign
+      ? "Main"
+      : "Onboarding"
+    : "Auth";
 
   return (
     <NavigationContainer>
@@ -116,7 +118,6 @@ export const AppNavigator = () => {
         initialRouteName={initialRoute}
         screenOptions={{ headerShown: false }}
       >
-        <Stack.Screen name="Splash" component={SplashScreen} />
         <Stack.Screen name="Auth" component={LoginScreen} />
         <Stack.Screen name="Onboarding" component={ZodiacSelectionScreen} />
         <Stack.Screen name="Main" component={MainTabs} />
